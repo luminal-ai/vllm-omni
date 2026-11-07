@@ -123,6 +123,12 @@ class FluxAttention(torch.nn.Module):
     # attentions a fused kernel takes (one query set over two key/value sets). A platform plugin
     # flips this class attribute at registration.
     attention_per_query_stream: bool = False
+    # Whether a pre-only attention (the single blocks') gathers its heads over the tensor-parallel
+    # group before returning them. The default does: the replicated `proj_out` after it reads every
+    # head. A platform plugin that splits `proj_out` over the heads (row-parallel: each rank reads
+    # its own heads and its slice of the MLP) clears it on the block's instance; the rank's heads
+    # are then returned as they are, and no gather is traced.
+    gather_pre_only_output: bool = True
 
     def __init__(
         self,
@@ -308,7 +314,7 @@ class FluxAttention(torch.nn.Module):
 
             return hidden_states, encoder_hidden_states
         else:
-            if get_tensor_model_parallel_world_size() > 1:
+            if self.gather_pre_only_output and get_tensor_model_parallel_world_size() > 1:
                 hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=-1)
             return hidden_states
 
