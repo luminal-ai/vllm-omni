@@ -312,15 +312,60 @@ def _make_compile_runner(
     compile_granularity: str = "regional",
     compile_dynamic: bool = True,
     use_hsdp: bool = False,
+    compile_backend: str | None = None,
 ):
     runner = object.__new__(DiffusionModelRunner)
     runner.pipeline = SimpleNamespace(transformer=model or SimpleNamespace())
     runner.od_config = SimpleNamespace(
         diffusion_compile_granularity=compile_granularity,
         diffusion_compile_dynamic=compile_dynamic,
+        diffusion_compile_backend=compile_backend,
         parallel_config=SimpleNamespace(use_hsdp=use_hsdp),
     )
     return runner
+
+
+
+def _neutral_compile_platform(monkeypatch):
+    """The default platform's compile policy (inductor, the configured dynamism): the installed
+    platform may be an out-of-tree one that adds its own backend."""
+    monkeypatch.setattr(model_runner_module.current_omni_platform, "get_torch_compile_kwargs", lambda od_config: {})
+
+
+class _PlatformWithCompileBackend:
+    """An out-of-tree platform whose transformers compile with its own static-shape backend."""
+
+    backend = object()
+
+    @classmethod
+    def get_torch_compile_kwargs(cls, od_config):
+        return {"backend": cls.backend, "dynamic": False}
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_compile_transformer_takes_the_platforms_backend_and_dynamism(monkeypatch):
+    runner = _make_compile_runner(compile_granularity="full")
+    compile_calls = []
+    runner.pipeline.transformer = SimpleNamespace(compile=lambda **kwargs: compile_calls.append(kwargs))
+    monkeypatch.setattr(model_runner_module, "current_omni_platform", _PlatformWithCompileBackend)
+
+    DiffusionModelRunner._compile_transformer(runner, "transformer")
+
+    assert compile_calls == [{"dynamic": False, "backend": _PlatformWithCompileBackend.backend}]
+
+
+@pytest.mark.core_model
+@pytest.mark.cpu
+def test_compile_transformer_lets_the_config_name_the_backend(monkeypatch):
+    runner = _make_compile_runner(compile_granularity="full", compile_backend="inductor")
+    compile_calls = []
+    runner.pipeline.transformer = SimpleNamespace(compile=lambda **kwargs: compile_calls.append(kwargs))
+    monkeypatch.setattr(model_runner_module, "current_omni_platform", _PlatformWithCompileBackend)
+
+    DiffusionModelRunner._compile_transformer(runner, "transformer")
+
+    assert compile_calls == [{"dynamic": False, "backend": "inductor"}]
 
 
 class _EnabledCacheBackend:
@@ -510,6 +555,7 @@ def test_update_states_carries_prepared_layout() -> None:
 @pytest.mark.cpu
 @pytest.mark.parametrize("use_hsdp", [False, True])
 def test_compile_transformer_regionally_compiles_blocks(monkeypatch, use_hsdp):
+    _neutral_compile_platform(monkeypatch)
     runner = _make_compile_runner(use_hsdp=use_hsdp)
     compile_calls = []
 
@@ -533,6 +579,7 @@ def test_compile_transformer_regionally_compiles_blocks(monkeypatch, use_hsdp):
 @pytest.mark.core_model
 @pytest.mark.cpu
 def test_compile_transformer_scopes_inductor_cudagraphs_to_decode_graph(monkeypatch):
+    _neutral_compile_platform(monkeypatch)
     model = SimpleNamespace(enable_cuda_graph_decode=True)
     runner = _make_compile_runner(model)
     compile_calls = []
@@ -562,6 +609,7 @@ def test_compile_transformer_scopes_inductor_cudagraphs_to_decode_graph(monkeypa
 @pytest.mark.core_model
 @pytest.mark.cpu
 def test_compile_transformer_uses_regional_dynamic_false_config(monkeypatch):
+    _neutral_compile_platform(monkeypatch)
     model = _CompileTrackingModel()
     runner = _make_compile_runner(model, compile_dynamic=False)
     compiled_model = object()
@@ -583,6 +631,7 @@ def test_compile_transformer_uses_regional_dynamic_false_config(monkeypatch):
 @pytest.mark.core_model
 @pytest.mark.cpu
 def test_compile_transformer_uses_full_granularity(monkeypatch):
+    _neutral_compile_platform(monkeypatch)
     model = _CompileTrackingModel()
     runner = _make_compile_runner(model, compile_granularity="full", compile_dynamic=False)
     regional_calls = []
